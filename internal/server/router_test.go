@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -96,5 +97,24 @@ func TestSessionAndMachineEndpoints(t *testing.T) {
 	r.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestAuth_InvalidPublicKeyErrorMessage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	st := store.New()
+	tokenCfg := auth.TokenConfig{Secret: "secret", Expiry: time.Hour, Issuer: "test"}
+	r := NewRouter(Deps{Store: st, TokenConfig: tokenCfg})
+
+	body, _ := json.Marshal(map[string]any{"publicKey": "not-base64", "challenge": "x", "signature": "y"})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/auth", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "Invalid public key") {
+		t.Fatalf("expected Invalid public key, got: %s", w.Body.String())
 	}
 }

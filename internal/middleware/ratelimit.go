@@ -32,7 +32,28 @@ func NewRateLimiterWithNow(limit int, window time.Duration, now func() time.Time
 		window:   window,
 		now:      now,
 	}
+	go rl.cleanup()
 	return rl
+}
+
+func (rl *RateLimiter) cleanup() {
+	if rl.window <= 0 {
+		return
+	}
+
+	ticker := time.NewTicker(rl.window)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		rl.mu.Lock()
+		now := rl.now()
+		for key, info := range rl.requests {
+			if now.After(info.resetAt) {
+				delete(rl.requests, key)
+			}
+		}
+		rl.mu.Unlock()
+	}
 }
 
 func (rl *RateLimiter) Allow(key string) bool {

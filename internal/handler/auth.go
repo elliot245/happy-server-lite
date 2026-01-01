@@ -39,9 +39,8 @@ func (h *AuthHandler) Auth(c *gin.Context) {
 		return
 	}
 
-	if !auth.VerifySignature(body.PublicKey, body.Challenge, body.Signature) {
-		// Distinguish invalid public key if possible
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid signature"})
+	if err := auth.VerifySignatureDetailed(body.PublicKey, body.Challenge, body.Signature); err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 		return
 	}
 

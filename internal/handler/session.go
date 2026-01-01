@@ -51,6 +51,10 @@ func (h *SessionHandler) GetOrCreate(c *gin.Context) {
 		"metadataVersion":   sess.MetadataVersion,
 		"agentState":        sess.AgentState,
 		"agentStateVersion": sess.AgentStateVersion,
+		"dataEncryptionKey": sess.DataEncryptionKey,
+		"active":            sess.Active,
+		"activeAt":          sess.ActiveAt,
+		"lastMessage":       nil,
 	}})
 }
 
@@ -74,6 +78,10 @@ func (h *SessionHandler) List(c *gin.Context) {
 			"metadataVersion":   sess.MetadataVersion,
 			"agentState":        sess.AgentState,
 			"agentStateVersion": sess.AgentStateVersion,
+			"dataEncryptionKey": sess.DataEncryptionKey,
+			"active":            sess.Active,
+			"activeAt":          sess.ActiveAt,
+			"lastMessage":       nil,
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"sessions": resp})

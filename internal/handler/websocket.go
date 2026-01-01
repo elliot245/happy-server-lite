@@ -3,6 +3,7 @@ package handler
 import (
 	"encoding/json"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -72,11 +73,42 @@ func (h *WebSocketHandler) Serve(c *gin.Context) {
 	}()
 
 	ws.SetReadLimit(1024 * 1024)
-	ws.SetReadDeadline(time.Now().Add(60 * time.Second))
+	const pongWait = 60 * time.Second
+	const writeWait = 10 * time.Second
+	pingPeriod := (pongWait * 9) / 10
+
+	ws.SetReadDeadline(time.Now().Add(pongWait))
 	ws.SetPongHandler(func(string) error {
-		ws.SetReadDeadline(time.Now().Add(60 * time.Second))
+		ws.SetReadDeadline(time.Now().Add(pongWait))
 		return nil
 	})
+
+	done := make(chan struct{})
+	var closeOnce sync.Once
+	closeDone := func() {
+		closeOnce.Do(func() {
+			close(done)
+		})
+	}
+	defer closeDone()
+
+	go func() {
+		ticker := time.NewTicker(pingPeriod)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				deadline := time.Now().Add(writeWait)
+				if err := ws.WriteControl(websocket.PingMessage, nil, deadline); err != nil {
+					_ = ws.Close()
+					return
+				}
+			}
+		}
+	}()
 
 	for {
 		_, data, err := ws.ReadMessage()

@@ -21,20 +21,58 @@ type Store struct {
 
 	machinesByID map[string]model.Machine
 
+	accountSettingsByUserID map[string]accountSettings
+
 	messages *messageStore
 	seq      *seqGenerator
 }
 
+type accountSettings struct {
+	Settings *string
+	Version  int
+}
+
 func New() *Store {
 	return &Store{
-		accountsByPublicKey: make(map[string]model.Account),
-		authRequestsByKey:   make(map[string]model.AuthRequest),
-		sessionsByID:        make(map[string]model.Session),
-		sessionIDByUserTag:  make(map[string]string),
-		machinesByID:        make(map[string]model.Machine),
-		messages:            newMessageStore(),
-		seq:                 newSeqGenerator(),
+		accountsByPublicKey:     make(map[string]model.Account),
+		authRequestsByKey:       make(map[string]model.AuthRequest),
+		sessionsByID:            make(map[string]model.Session),
+		sessionIDByUserTag:      make(map[string]string),
+		machinesByID:            make(map[string]model.Machine),
+		accountSettingsByUserID: make(map[string]accountSettings),
+		messages:                newMessageStore(),
+		seq:                     newSeqGenerator(),
 	}
+}
+
+func (s *Store) GetAccountSettings(userID string) (*string, int) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	st, ok := s.accountSettingsByUserID[userID]
+	if !ok {
+		return nil, 0
+	}
+	return st.Settings, st.Version
+}
+
+func (s *Store) UpdateAccountSettings(userID string, expectedVersion int, settings string, nowMillis int64) (status string, currentVersion int, currentSettings *string) {
+	if userID == "" {
+		return "error", 0, nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	st := s.accountSettingsByUserID[userID]
+	if expectedVersion != st.Version {
+		return "version-mismatch", st.Version, st.Settings
+	}
+
+	st.Version++
+	st.Settings = &settings
+	s.accountSettingsByUserID[userID] = st
+	return "success", st.Version, st.Settings
 }
 
 func (s *Store) GetOrCreateAccount(publicKey string, nowMillis int64) (model.Account, bool) {
@@ -191,6 +229,61 @@ func (s *Store) ListSessions(userID string) []model.Session {
 	return result
 }
 
+func (s *Store) UpdateSessionMetadata(userID, sessionID string, expectedVersion int, metadata string, nowMillis int64) (status string, version int, currentValue string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sess, ok := s.sessionsByID[sessionID]
+	if !ok || sess.UserID != userID || sess.Deleted {
+		return "not-found", 0, ""
+	}
+	if expectedVersion != sess.MetadataVersion {
+		return "version-mismatch", sess.MetadataVersion, sess.Metadata
+	}
+
+	sess.Metadata = metadata
+	sess.MetadataVersion++
+	sess.UpdatedAt = nowMillis
+	s.sessionsByID[sessionID] = sess
+	return "success", sess.MetadataVersion, sess.Metadata
+}
+
+func (s *Store) UpdateSessionAgentState(userID, sessionID string, expectedVersion int, agentState *string, nowMillis int64) (status string, version int, currentValue *string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sess, ok := s.sessionsByID[sessionID]
+	if !ok || sess.UserID != userID || sess.Deleted {
+		return "not-found", 0, nil
+	}
+	if expectedVersion != sess.AgentStateVersion {
+		return "version-mismatch", sess.AgentStateVersion, sess.AgentState
+	}
+
+	sess.AgentState = agentState
+	sess.AgentStateVersion++
+	sess.UpdatedAt = nowMillis
+	s.sessionsByID[sessionID] = sess
+	return "success", sess.AgentStateVersion, sess.AgentState
+}
+
+func (s *Store) SetSessionActive(userID, sessionID string, active bool, activeAt int64, nowMillis int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sess, ok := s.sessionsByID[sessionID]
+	if !ok || sess.UserID != userID || sess.Deleted {
+		return false
+	}
+	sess.Active = active
+	if active {
+		sess.ActiveAt = activeAt
+	}
+	sess.UpdatedAt = nowMillis
+	s.sessionsByID[sessionID] = sess
+	return true
+}
+
 func (s *Store) GetSession(userID, sessionID string) (model.Session, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -313,6 +406,55 @@ func (s *Store) UpsertMachine(userID, machineID, metadata string, daemonState *s
 	}
 	s.machinesByID[machineID] = m
 	return m, true, nil
+}
+
+func (s *Store) GetMachine(userID, machineID string) (model.Machine, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	m, ok := s.machinesByID[machineID]
+	if !ok || m.UserID != userID {
+		return model.Machine{}, false
+	}
+	return m, true
+}
+
+func (s *Store) UpdateMachineMetadata(userID, machineID string, expectedVersion int, metadata string, nowMillis int64) (status string, version int, currentValue string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	m, ok := s.machinesByID[machineID]
+	if !ok || m.UserID != userID {
+		return "not-found", 0, ""
+	}
+	if expectedVersion != m.MetadataVersion {
+		return "version-mismatch", m.MetadataVersion, m.Metadata
+	}
+
+	m.Metadata = metadata
+	m.MetadataVersion++
+	m.UpdatedAt = nowMillis
+	s.machinesByID[machineID] = m
+	return "success", m.MetadataVersion, m.Metadata
+}
+
+func (s *Store) UpdateMachineDaemonState(userID, machineID string, expectedVersion int, daemonState *string, nowMillis int64) (status string, version int, currentValue *string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	m, ok := s.machinesByID[machineID]
+	if !ok || m.UserID != userID {
+		return "not-found", 0, nil
+	}
+	if expectedVersion != m.DaemonStateVersion {
+		return "version-mismatch", m.DaemonStateVersion, m.DaemonState
+	}
+
+	m.DaemonState = daemonState
+	m.DaemonStateVersion++
+	m.UpdatedAt = nowMillis
+	s.machinesByID[machineID] = m
+	return "success", m.DaemonStateVersion, m.DaemonState
 }
 
 func (s *Store) ListMachines(userID string) []model.Machine {

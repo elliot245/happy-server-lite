@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  happy-server:
+    build: .
+    container_name: happy-server-lite
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - MASTER_SECRET=${MASTER_SECRET:-change-this-secret}
+      - GIN_MODE=release
+    restart: unless-stopped

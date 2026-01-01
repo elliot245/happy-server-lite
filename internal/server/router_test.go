@@ -118,3 +118,77 @@ func TestAuth_InvalidPublicKeyErrorMessage(t *testing.T) {
 		t.Fatalf("expected Invalid public key, got: %s", w.Body.String())
 	}
 }
+
+func TestWelcomeAndVersionEndpoints(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	st := store.New()
+	tokenCfg := auth.TokenConfig{Secret: "secret", Expiry: time.Hour, Issuer: "test"}
+	r := NewRouter(Deps{Store: st, TokenConfig: tokenCfg})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "Welcome to Happy Server!") {
+		t.Fatalf("expected welcome body, got: %s", w.Body.String())
+	}
+
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/v1/version", bytes.NewReader([]byte(`{"platform":"ios","version":"1.0","app_id":"x"}`)))
+	req.Header.Set("Content-Type", "application/json")
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "update_required") {
+		t.Fatalf("expected update_required, got: %s", w.Body.String())
+	}
+}
+
+func TestAccountSettingsVersionMismatch(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	st := store.New()
+	tokenCfg := auth.TokenConfig{Secret: "secret", Expiry: time.Hour, Issuer: "test"}
+	r := NewRouter(Deps{Store: st, TokenConfig: tokenCfg})
+
+	userToken, err := auth.CreateToken("user-1", tokenCfg)
+	if err != nil {
+		t.Fatalf("CreateToken: %v", err)
+	}
+
+	// initial GET should return settings null and version 0
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/account/settings", nil)
+	req.Header.Set("Authorization", "Bearer "+userToken)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// update with expectedVersion 0 should succeed
+	body, _ := json.Marshal(map[string]any{"settings": "enc", "expectedVersion": 0})
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/v1/account/settings", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+userToken)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// update with expectedVersion 0 again should version-mismatch
+	body, _ = json.Marshal(map[string]any{"settings": "enc2", "expectedVersion": 0})
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/v1/account/settings", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+userToken)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "version-mismatch") {
+		t.Fatalf("expected version-mismatch, got: %s", w.Body.String())
+	}
+}

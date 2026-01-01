@@ -15,6 +15,11 @@ import (
 	"happy-server-lite/internal/store"
 )
 
+const (
+	maxPayload   int64         = 1000000
+	writeTimeout time.Duration = 10 * time.Second
+)
+
 type Deps struct {
 	Store       *store.Store
 	TokenConfig auth.TokenConfig
@@ -56,6 +61,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
+	ws.SetReadLimit(maxPayload)
 
 	c := newConn(ws)
 	s.registerConn(c)
@@ -66,7 +72,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"upgrades":     []string{},
 		"pingInterval": 25000,
 		"pingTimeout":  20000,
-		"maxPayload":   1000000,
+		"maxPayload":   maxPayload,
 	}
 	openBytes, _ := json.Marshal(open)
 	_ = c.writeText(string(engineOpen) + string(openBytes))
@@ -148,7 +154,9 @@ func (s *Server) broadcastToRoom(rooms map[string]map[*conn]struct{}, key string
 	s.mu.RUnlock()
 
 	for _, c := range conns {
-		_ = c.writeText(string(engineMessage) + payload)
+		if err := c.writeText(string(engineMessage) + payload); err != nil {
+			s.unregisterConn(c)
+		}
 	}
 }
 
@@ -700,6 +708,9 @@ func (c *conn) close() {
 func (c *conn) writeText(msg string) error {
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
+	if err := c.ws.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
+		return err
+	}
 	return c.ws.WriteMessage(websocket.TextMessage, []byte(msg))
 }
 

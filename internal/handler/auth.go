@@ -115,8 +115,7 @@ func (h *AuthHandler) Response(c *gin.Context) {
 	}
 
 	now := time.Now().UnixMilli()
-	account, _ := h.Store.GetOrCreateAccount(body.PublicKey, now)
-	token, err := auth.CreateToken(account.ID, h.TokenConfig)
+	token, err := auth.CreateToken(userID, h.TokenConfig)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Token creation failed"})
 		return

@@ -50,10 +50,14 @@ func (h *MachineHandler) Upsert(c *gin.Context) {
 		"id":                 m.ID,
 		"createdAt":          m.CreatedAt,
 		"updatedAt":          m.UpdatedAt,
+		"seq":                0,
+		"active":             false,
+		"activeAt":           0,
 		"metadata":           m.Metadata,
 		"metadataVersion":    m.MetadataVersion,
 		"daemonState":        m.DaemonState,
 		"daemonStateVersion": m.DaemonStateVersion,
+		"dataEncryptionKey":  m.DataEncryptionKey,
 	}})
 }
 
@@ -71,11 +75,15 @@ func (h *MachineHandler) List(c *gin.Context) {
 			"id":                 m.ID,
 			"createdAt":          m.CreatedAt,
 			"updatedAt":          m.UpdatedAt,
+			"seq":                0,
+			"active":             false,
+			"activeAt":           0,
 			"metadata":           m.Metadata,
 			"metadataVersion":    m.MetadataVersion,
 			"daemonState":        m.DaemonState,
 			"daemonStateVersion": m.DaemonStateVersion,
+			"dataEncryptionKey":  m.DataEncryptionKey,
 		})
 	}
-	c.JSON(http.StatusOK, gin.H{"machines": resp})
+	c.JSON(http.StatusOK, resp)
 }

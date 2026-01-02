@@ -106,6 +106,56 @@ func TestSessionAndMachineEndpoints(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
+
+	// list machines (iOS expects a top-level JSON array)
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v1/machines", nil)
+	req.Header.Set("Authorization", "Bearer "+userToken)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var machines []map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &machines); err != nil {
+		t.Fatalf("unmarshal machines: %v (%s)", err, w.Body.String())
+	}
+	if len(machines) != 1 {
+		t.Fatalf("expected 1 machine, got %d: %v", len(machines), machines)
+	}
+	m := machines[0]
+	if m["id"] != "m1" {
+		t.Fatalf("unexpected machine id: %v", m["id"])
+	}
+	if m["metadata"] != "mm" {
+		t.Fatalf("unexpected metadata: %v", m["metadata"])
+	}
+	if m["metadataVersion"] != float64(1) {
+		t.Fatalf("unexpected metadataVersion: %v", m["metadataVersion"])
+	}
+	if _, ok := m["daemonState"]; !ok {
+		t.Fatalf("expected daemonState key")
+	}
+	if m["daemonStateVersion"] != float64(0) {
+		t.Fatalf("unexpected daemonStateVersion: %v", m["daemonStateVersion"])
+	}
+	if m["seq"] != float64(0) {
+		t.Fatalf("unexpected seq: %v", m["seq"])
+	}
+	if m["active"] != false {
+		t.Fatalf("unexpected active: %v", m["active"])
+	}
+	if m["activeAt"] != float64(0) {
+		t.Fatalf("unexpected activeAt: %v", m["activeAt"])
+	}
+	if _, ok := m["dataEncryptionKey"]; !ok {
+		t.Fatalf("expected dataEncryptionKey key")
+	}
+	if createdAt, ok := m["createdAt"].(float64); !ok || createdAt <= 0 {
+		t.Fatalf("unexpected createdAt: %v", m["createdAt"])
+	}
+	if updatedAt, ok := m["updatedAt"].(float64); !ok || updatedAt <= 0 {
+		t.Fatalf("unexpected updatedAt: %v", m["updatedAt"])
+	}
 }
 
 func TestAuth_InvalidPublicKeyErrorMessage(t *testing.T) {

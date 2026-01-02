@@ -143,6 +143,22 @@ func buildSocketEventPacket(namespace string, id *int, event string, args ...any
 	return b.String(), nil
 }
 
+func buildSocketConnectPacket(namespace string, sid string) (string, error) {
+	data, err := json.Marshal(map[string]string{"sid": sid})
+	if err != nil {
+		return "", err
+	}
+
+	var b strings.Builder
+	b.WriteByte(byte(socketConnect))
+	if namespace != "" && namespace != "/" {
+		b.WriteString(namespace)
+		b.WriteByte(',')
+	}
+	b.Write(data)
+	return b.String(), nil
+}
+
 func buildSocketAckPacket(namespace string, id int, args ...any) (string, error) {
 	if args == nil {
 		args = make([]any, 0)

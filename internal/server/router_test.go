@@ -64,6 +64,14 @@ func TestAuthRequestFlow(t *testing.T) {
 	if resp["token"] == "" || resp["response"] != "resp" {
 		t.Fatalf("unexpected auth response: %v", resp)
 	}
+	issuedToken, _ := resp["token"].(string)
+	claims, err := auth.VerifyToken(issuedToken, tokenCfg)
+	if err != nil {
+		t.Fatalf("VerifyToken: %v", err)
+	}
+	if claims.UserID != "mobile-1" {
+		t.Fatalf("expected issued token for mobile-1, got %q", claims.UserID)
+	}
 }
 
 func TestSessionAndMachineEndpoints(t *testing.T) {

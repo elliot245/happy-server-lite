@@ -216,7 +216,7 @@ func (s *Server) handleConnect(c *conn, payload string) {
 		return
 	}
 
-	_, rest := parseOptionalNamespace(payload[1:])
+	ns, rest := parseOptionalNamespace(payload[1:])
 	if rest == "" {
 		_ = c.writeSocketError("Missing auth")
 		c.close()
@@ -290,7 +290,12 @@ func (s *Server) handleConnect(c *conn, payload string) {
 	}
 	s.mu.Unlock()
 
-	_ = c.writeText(string(engineMessage) + string(socketConnect))
+	ack, err := buildSocketConnectPacket(ns, c.sid)
+	if err != nil {
+		c.close()
+		return
+	}
+	_ = c.writeText(string(engineMessage) + ack)
 }
 
 func (s *Server) handleEvent(c *conn, payload string) {

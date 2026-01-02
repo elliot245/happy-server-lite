@@ -20,6 +20,8 @@ type Store struct {
 	sessionIDByUserTag map[string]string // userID + "|" + tag -> sessionID
 
 	machinesByID map[string]model.Machine
+	artifactsByID map[string]model.Artifact
+	artifactSeq   int64
 
 	accountSettingsByUserID map[string]accountSettings
 
@@ -39,6 +41,7 @@ func New() *Store {
 		sessionsByID:            make(map[string]model.Session),
 		sessionIDByUserTag:      make(map[string]string),
 		machinesByID:            make(map[string]model.Machine),
+		artifactsByID:           make(map[string]model.Artifact),
 		accountSettingsByUserID: make(map[string]accountSettings),
 		messages:                newMessageStore(),
 		seq:                     newSeqGenerator(),

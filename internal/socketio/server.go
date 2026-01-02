@@ -90,17 +90,22 @@ func (s *Server) registerConn(c *conn) {
 }
 
 func (s *Server) unregisterConn(c *conn) {
+	clientType := c.clientType
+	userID := c.userID
+	sessionID := c.sessionID
+	machineID := c.machineID
+
 	s.mu.Lock()
 	delete(s.connsBySocket, c.ws)
-	if c.userID != "" {
-		if c.clientType == "user-scoped" {
-			s.leaveRoom(s.roomUsers, c.userID, c)
+	if userID != "" {
+		if clientType == "user-scoped" {
+			s.leaveRoom(s.roomUsers, userID, c)
 		}
-		if c.sessionID != "" {
-			s.leaveRoom(s.roomSessions, c.sessionID, c)
+		if sessionID != "" {
+			s.leaveRoom(s.roomSessions, sessionID, c)
 		}
-		if c.machineID != "" {
-			s.leaveRoom(s.roomMachines, c.machineID, c)
+		if machineID != "" {
+			s.leaveRoom(s.roomMachines, machineID, c)
 		}
 	}
 	for method, owner := range s.rpcByMethod {
@@ -109,6 +114,23 @@ func (s *Server) unregisterConn(c *conn) {
 		}
 	}
 	s.mu.Unlock()
+
+	now := time.Now().UnixMilli()
+	if userID != "" {
+		if clientType == "machine-scoped" && machineID != "" {
+			pkt, err := buildSocketEventPacket("/", nil, "ephemeral", gin.H{"type": "machine-activity", "id": machineID, "active": false, "activeAt": now})
+			if err == nil {
+				s.broadcastToRoom(s.roomUsers, userID, pkt)
+			}
+		}
+		if clientType == "session-scoped" && sessionID != "" {
+			pkt, err := buildSocketEventPacket("/", nil, "ephemeral", gin.H{"type": "activity", "id": sessionID, "active": false, "activeAt": now, "thinking": false})
+			if err == nil {
+				s.broadcastToRoom(s.roomUsers, userID, pkt)
+				s.broadcastToRoom(s.roomSessions, sessionID, pkt)
+			}
+		}
+	}
 
 	c.close()
 }
@@ -328,6 +350,10 @@ func (s *Server) handleEvent(c *conn, payload string) {
 		s.mu.Lock()
 		s.rpcByMethod[body.Method] = c
 		s.mu.Unlock()
+		registered, err := buildSocketEventPacket(pkt.Namespace, nil, "rpc-registered", gin.H{"method": body.Method})
+		if err == nil {
+			_ = c.writeText(string(engineMessage) + registered)
+		}
 		return
 
 	case "rpc-unregister":
@@ -343,6 +369,10 @@ func (s *Server) handleEvent(c *conn, payload string) {
 			delete(s.rpcByMethod, body.Method)
 		}
 		s.mu.Unlock()
+		unregistered, err := buildSocketEventPacket(pkt.Namespace, nil, "rpc-unregistered", gin.H{"method": body.Method})
+		if err == nil {
+			_ = c.writeText(string(engineMessage) + unregistered)
+		}
 		return
 
 	case "rpc-call":
@@ -389,6 +419,67 @@ func (s *Server) handleEvent(c *conn, payload string) {
 		s.handleMachineStateUpdate(c, pkt)
 		return
 
+	case "machine-alive":
+		var body struct {
+			MachineID string `json:"machineId"`
+			Time      int64  `json:"time"`
+		}
+		if len(pkt.Args) < 1 || json.Unmarshal(pkt.Args[0], &body) != nil {
+			return
+		}
+		machineID := body.MachineID
+		if machineID == "" {
+			machineID = c.machineID
+		}
+		if c.clientType != "machine-scoped" || machineID == "" || machineID != c.machineID {
+			return
+		}
+		activeAt := body.Time
+		if activeAt <= 0 {
+			activeAt = time.Now().UnixMilli()
+		}
+		pktStr, err := buildSocketEventPacket("/", nil, "ephemeral", gin.H{"type": "machine-activity", "id": machineID, "active": true, "activeAt": activeAt})
+		if err != nil {
+			return
+		}
+		s.broadcastToRoom(s.roomMachines, machineID, pktStr)
+		s.broadcastToRoom(s.roomUsers, c.userID, pktStr)
+		return
+
+	case "usage-report":
+		var body struct {
+			Key       string             `json:"key"`
+			SessionID string             `json:"sessionId"`
+			Tokens    map[string]float64 `json:"tokens"`
+			Cost      map[string]float64 `json:"cost"`
+		}
+		if len(pkt.Args) < 1 || json.Unmarshal(pkt.Args[0], &body) != nil {
+			return
+		}
+		if body.Key == "" || body.SessionID == "" {
+			return
+		}
+		now := time.Now().UnixMilli()
+		tokens := gin.H{
+			"total":         body.Tokens["total"],
+			"input":         body.Tokens["input"],
+			"output":        body.Tokens["output"],
+			"cache_creation": body.Tokens["cache_creation"],
+			"cache_read":     body.Tokens["cache_read"],
+		}
+		cost := gin.H{
+			"total":  body.Cost["total"],
+			"input":  body.Cost["input"],
+			"output": body.Cost["output"],
+		}
+		ephemeral, err := buildSocketEventPacket("/", nil, "ephemeral", gin.H{"type": "usage", "id": body.SessionID, "key": body.Key, "timestamp": now, "tokens": tokens, "cost": cost})
+		if err != nil {
+			return
+		}
+		s.broadcastToRoom(s.roomUsers, c.userID, ephemeral)
+		s.broadcastToRoom(s.roomSessions, body.SessionID, ephemeral)
+		return
+
 	case "session-alive":
 		var body struct {
 			SID  string `json:"sid"`
@@ -398,6 +489,15 @@ func (s *Server) handleEvent(c *conn, payload string) {
 			return
 		}
 		s.store.SetSessionActive(c.userID, body.SID, true, body.Time, time.Now().UnixMilli())
+		activeAt := body.Time
+		if activeAt <= 0 {
+			activeAt = time.Now().UnixMilli()
+		}
+		ephemeral, err := buildSocketEventPacket("/", nil, "ephemeral", gin.H{"type": "activity", "id": body.SID, "active": true, "activeAt": activeAt, "thinking": false})
+		if err == nil {
+			s.broadcastToRoom(s.roomUsers, c.userID, ephemeral)
+			s.broadcastToRoom(s.roomSessions, body.SID, ephemeral)
+		}
 		return
 
 	case "session-end":
@@ -407,7 +507,13 @@ func (s *Server) handleEvent(c *conn, payload string) {
 		if len(pkt.Args) < 1 || json.Unmarshal(pkt.Args[0], &body) != nil || body.SID == "" {
 			return
 		}
-		s.store.SetSessionActive(c.userID, body.SID, false, 0, time.Now().UnixMilli())
+		now := time.Now().UnixMilli()
+		s.store.SetSessionActive(c.userID, body.SID, false, 0, now)
+		ephemeral, err := buildSocketEventPacket("/", nil, "ephemeral", gin.H{"type": "activity", "id": body.SID, "active": false, "activeAt": now, "thinking": false})
+		if err == nil {
+			s.broadcastToRoom(s.roomUsers, c.userID, ephemeral)
+			s.broadcastToRoom(s.roomSessions, body.SID, ephemeral)
+		}
 		return
 
 	default:
@@ -443,17 +549,28 @@ func (s *Server) nextUpdateID() (string, int64) {
 }
 
 func (s *Server) handleSessionMessage(c *conn, pkt socketEventPacket) {
-	if c.clientType != "session-scoped" {
-		return
-	}
 	var body struct {
 		SID     string `json:"sid"`
 		Message string `json:"message"`
+		LocalID string `json:"localId"`
 	}
 	if len(pkt.Args) < 1 || json.Unmarshal(pkt.Args[0], &body) != nil {
 		return
 	}
-	if body.SID == "" || body.SID != c.sessionID {
+	if body.SID == "" {
+		return
+	}
+
+	switch c.clientType {
+	case "session-scoped":
+		if body.SID != c.sessionID {
+			return
+		}
+	case "user-scoped":
+		if _, ok := s.store.GetSession(c.userID, body.SID); !ok {
+			return
+		}
+	default:
 		return
 	}
 
@@ -461,6 +578,19 @@ func (s *Server) handleSessionMessage(c *conn, pkt socketEventPacket) {
 	msg, err := s.store.AppendMessage(c.userID, body.SID, body.Message, now)
 	if err != nil {
 		return
+	}
+
+	messageObj := gin.H{
+		"id":  msg.ID,
+		"seq": msg.Seq,
+		"content": gin.H{
+			"t": "encrypted",
+			"c": msg.Content,
+		},
+		"createdAt": msg.CreatedAt,
+	}
+	if body.LocalID != "" {
+		messageObj["localId"] = body.LocalID
 	}
 	updateID, updateSeq := s.nextUpdateID()
 	updatePayload, err := buildSocketEventPacket("/", nil, "update", gin.H{
@@ -470,14 +600,7 @@ func (s *Server) handleSessionMessage(c *conn, pkt socketEventPacket) {
 		"body": gin.H{
 			"t":   "new-message",
 			"sid": body.SID,
-			"message": gin.H{
-				"id":  msg.ID,
-				"seq": msg.Seq,
-				"content": gin.H{
-					"t": "encrypted",
-					"c": msg.Content,
-				},
-			},
+			"message": messageObj,
 		},
 	})
 	if err != nil {

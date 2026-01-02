@@ -54,3 +54,17 @@ type Machine struct {
 	CreatedAt          int64
 	UpdatedAt          int64
 }
+
+type Artifact struct {
+	ID               string
+	UserID           string
+	Header           string
+	HeaderVersion    int
+	Body             string
+	BodyVersion      int
+	DataEncryptionKey string
+	Seq              int64
+	CreatedAt        int64
+	UpdatedAt        int64
+	Deleted          bool
+}

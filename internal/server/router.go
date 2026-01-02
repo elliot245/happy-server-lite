@@ -62,6 +62,29 @@ func NewRouter(deps Deps) *gin.Engine {
 	protected.GET("/machines", machineHandler.List)
 	protected.POST("/machines", machineHandler.Upsert)
 
+	artifactHandler := &handler.ArtifactHandler{Store: deps.Store}
+	protected.GET("/artifacts", artifactHandler.List)
+	protected.POST("/artifacts", artifactHandler.Create)
+	protected.GET("/artifacts/:id", artifactHandler.Get)
+	protected.POST("/artifacts/:id", artifactHandler.Update)
+	protected.DELETE("/artifacts/:id", artifactHandler.Delete)
+
+	feedHandler := &handler.FeedHandler{}
+	protected.GET("/feed", feedHandler.List)
+
+	friendsHandler := &handler.FriendsHandler{}
+	protected.GET("/friends", friendsHandler.List)
+	protected.POST("/friends/add", friendsHandler.Add)
+	protected.POST("/friends/remove", friendsHandler.Remove)
+
+	userHandler := &handler.UserHandler{}
+	protected.GET("/user/search", userHandler.Search)
+	protected.GET("/user/:id", userHandler.Get)
+
+	pushHandler := &handler.PushTokensHandler{}
+	protected.GET("/push-tokens", pushHandler.List)
+	protected.POST("/push-tokens", pushHandler.Register)
+
 	wsHub := hub.New()
 	wsHandler := &handler.WebSocketHandler{Hub: wsHub, Store: deps.Store, TokenConfig: deps.TokenConfig}
 	r.GET("/ws", wsHandler.Serve)
@@ -69,6 +92,8 @@ func NewRouter(deps Deps) *gin.Engine {
 	sio := socketio.NewServer(socketio.Deps{Store: deps.Store, TokenConfig: deps.TokenConfig})
 	r.Any("/v1/updates", gin.WrapH(sio))
 	r.Any("/v1/updates/*any", gin.WrapH(sio))
+	r.Any("/v1/user-machine-daemon", gin.WrapH(sio))
+	r.Any("/v1/user-machine-daemon/*any", gin.WrapH(sio))
 
 	return r
 }

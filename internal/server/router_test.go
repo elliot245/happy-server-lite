@@ -250,3 +250,302 @@ func TestAccountSettingsVersionMismatch(t *testing.T) {
 		t.Fatalf("expected version-mismatch, got: %s", w.Body.String())
 	}
 }
+
+func TestArtifactsFeedFriendsAndPushTokensEndpoints(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	st := store.New()
+	tokenCfg := auth.TokenConfig{Secret: "secret", Expiry: time.Hour, Issuer: "test"}
+	r := NewRouter(Deps{Store: st, TokenConfig: tokenCfg})
+
+	userToken, err := auth.CreateToken("user-1", tokenCfg)
+	if err != nil {
+		t.Fatalf("CreateToken: %v", err)
+	}
+
+	// empty artifacts list is a top-level array
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/artifacts", nil)
+	req.Header.Set("Authorization", "Bearer "+userToken)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var artifacts []map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &artifacts); err != nil {
+		t.Fatalf("unmarshal artifacts: %v (%s)", err, w.Body.String())
+	}
+	if len(artifacts) != 0 {
+		t.Fatalf("expected 0 artifacts, got %d", len(artifacts))
+	}
+
+	// create artifact
+	body, _ := json.Marshal(map[string]any{"id": "a1", "header": "h1", "body": "b1", "dataEncryptionKey": "k1"})
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/v1/artifacts", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+userToken)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var created map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
+		t.Fatalf("unmarshal created artifact: %v (%s)", err, w.Body.String())
+	}
+	if created["id"] != "a1" {
+		t.Fatalf("unexpected id: %v", created["id"])
+	}
+	if created["headerVersion"] != float64(1) || created["bodyVersion"] != float64(1) {
+		t.Fatalf("unexpected versions: %v", created)
+	}
+
+	// list artifacts should omit body fields
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v1/artifacts", nil)
+	req.Header.Set("Authorization", "Bearer "+userToken)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &artifacts); err != nil {
+		t.Fatalf("unmarshal artifacts: %v (%s)", err, w.Body.String())
+	}
+	if len(artifacts) != 1 {
+		t.Fatalf("expected 1 artifact, got %d", len(artifacts))
+	}
+	if _, ok := artifacts[0]["body"]; ok {
+		t.Fatalf("expected list artifact to omit body")
+	}
+
+	// fetch full artifact should include body
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v1/artifacts/a1", nil)
+	req.Header.Set("Authorization", "Bearer "+userToken)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var full map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &full); err != nil {
+		t.Fatalf("unmarshal full artifact: %v (%s)", err, w.Body.String())
+	}
+	if full["body"] != "b1" {
+		t.Fatalf("unexpected body: %v", full["body"])
+	}
+
+	// update artifact with expected version
+	body, _ = json.Marshal(map[string]any{"header": "h2", "expectedHeaderVersion": 1})
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/v1/artifacts/a1", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+userToken)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var upd map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &upd); err != nil {
+		t.Fatalf("unmarshal update response: %v (%s)", err, w.Body.String())
+	}
+	if upd["success"] != true || upd["headerVersion"] != float64(2) {
+		t.Fatalf("unexpected update response: %v", upd)
+	}
+
+	// update with wrong expected version should return version-mismatch
+	body, _ = json.Marshal(map[string]any{"body": "b2", "expectedBodyVersion": 0})
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/v1/artifacts/a1", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+userToken)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &upd); err != nil {
+		t.Fatalf("unmarshal update response: %v (%s)", err, w.Body.String())
+	}
+	if upd["success"] != false || upd["error"] != "version-mismatch" {
+		t.Fatalf("unexpected version mismatch response: %v", upd)
+	}
+	if upd["currentBodyVersion"] != float64(1) {
+		t.Fatalf("expected currentBodyVersion 1, got: %v", upd["currentBodyVersion"])
+	}
+
+	// feed
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v1/feed", nil)
+	req.Header.Set("Authorization", "Bearer "+userToken)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var feed map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &feed); err != nil {
+		t.Fatalf("unmarshal feed: %v (%s)", err, w.Body.String())
+	}
+	if feed["hasMore"] != false {
+		t.Fatalf("unexpected hasMore: %v", feed["hasMore"])
+	}
+
+	// friends
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v1/friends", nil)
+	req.Header.Set("Authorization", "Bearer "+userToken)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var friends map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &friends); err != nil {
+		t.Fatalf("unmarshal friends: %v (%s)", err, w.Body.String())
+	}
+	if _, ok := friends["friends"]; !ok {
+		t.Fatalf("expected friends key")
+	}
+
+	// push tokens
+	body, _ = json.Marshal(map[string]any{"token": "expo-1"})
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/v1/push-tokens", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+userToken)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var pushResp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &pushResp); err != nil {
+		t.Fatalf("unmarshal push response: %v (%s)", err, w.Body.String())
+	}
+	if pushResp["success"] != true {
+		t.Fatalf("unexpected push response: %v", pushResp)
+	}
+
+	// user search should return schema object
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v1/user/search?query=x", nil)
+	req.Header.Set("Authorization", "Bearer "+userToken)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var search map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &search); err != nil {
+		t.Fatalf("unmarshal search: %v (%s)", err, w.Body.String())
+	}
+	if _, ok := search["users"]; !ok {
+		t.Fatalf("expected users key")
+	}
+}
+
+func TestArtifactsAreIsolatedPerUser(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	st := store.New()
+	tokenCfg := auth.TokenConfig{Secret: "secret", Expiry: time.Hour, Issuer: "test"}
+	r := NewRouter(Deps{Store: st, TokenConfig: tokenCfg})
+
+	user1Token, err := auth.CreateToken("user-1", tokenCfg)
+	if err != nil {
+		t.Fatalf("CreateToken(user-1): %v", err)
+	}
+	user2Token, err := auth.CreateToken("user-2", tokenCfg)
+	if err != nil {
+		t.Fatalf("CreateToken(user-2): %v", err)
+	}
+
+	// both users create artifact with the same id
+	body, _ := json.Marshal(map[string]any{"id": "a1", "header": "h1", "body": "b1", "dataEncryptionKey": "k1"})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/artifacts", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+user1Token)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	body, _ = json.Marshal(map[string]any{"id": "a1", "header": "h2", "body": "b2", "dataEncryptionKey": "k2"})
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/v1/artifacts", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+user2Token)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// user-1 list shows only its artifact
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v1/artifacts", nil)
+	req.Header.Set("Authorization", "Bearer "+user1Token)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var list1 []map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &list1); err != nil {
+		t.Fatalf("unmarshal list1: %v (%s)", err, w.Body.String())
+	}
+	if len(list1) != 1 || list1[0]["header"] != "h1" {
+		t.Fatalf("unexpected list1: %v", list1)
+	}
+
+	// user-2 list shows only its artifact
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v1/artifacts", nil)
+	req.Header.Set("Authorization", "Bearer "+user2Token)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var list2 []map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &list2); err != nil {
+		t.Fatalf("unmarshal list2: %v (%s)", err, w.Body.String())
+	}
+	if len(list2) != 1 || list2[0]["header"] != "h2" {
+		t.Fatalf("unexpected list2: %v", list2)
+	}
+
+	// update user-1 header; must not affect user-2
+	body, _ = json.Marshal(map[string]any{"header": "h1-upd", "expectedHeaderVersion": 1})
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/v1/artifacts/a1", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+user1Token)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// user-1 get returns its updated header
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v1/artifacts/a1", nil)
+	req.Header.Set("Authorization", "Bearer "+user1Token)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var full1 map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &full1); err != nil {
+		t.Fatalf("unmarshal full1: %v (%s)", err, w.Body.String())
+	}
+	if full1["header"] != "h1-upd" {
+		t.Fatalf("unexpected full1 header: %v", full1["header"])
+	}
+
+	// user-2 get remains unchanged
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v1/artifacts/a1", nil)
+	req.Header.Set("Authorization", "Bearer "+user2Token)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var full2 map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &full2); err != nil {
+		t.Fatalf("unmarshal full2: %v (%s)", err, w.Body.String())
+	}
+	if full2["header"] != "h2" {
+		t.Fatalf("unexpected full2 header: %v", full2["header"])
+	}
+}

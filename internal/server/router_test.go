@@ -106,6 +106,25 @@ func TestSessionAndMachineEndpoints(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
+
+	// list machines (iOS expects a top-level JSON array)
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v1/machines", nil)
+	req.Header.Set("Authorization", "Bearer "+userToken)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var machines []map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &machines); err != nil {
+		t.Fatalf("unmarshal machines: %v (%s)", err, w.Body.String())
+	}
+	if len(machines) != 1 {
+		t.Fatalf("expected 1 machine, got %d: %v", len(machines), machines)
+	}
+	if machines[0]["id"] != "m1" {
+		t.Fatalf("unexpected machine id: %v", machines[0]["id"])
+	}
 }
 
 func TestAuth_InvalidPublicKeyErrorMessage(t *testing.T) {

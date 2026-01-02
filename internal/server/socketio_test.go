@@ -226,6 +226,85 @@ func TestSocketIOMachineAliveBroadcastsEphemeral(t *testing.T) {
 	}
 }
 
+func TestSocketIOSessionAliveBroadcastsThinkingState(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	st := store.New()
+	tokenCfg := auth.TokenConfig{Secret: "secret", Expiry: time.Hour, Issuer: "test"}
+	r := NewRouter(Deps{Store: st, TokenConfig: tokenCfg})
+
+	userToken, err := auth.CreateToken("user-1", tokenCfg)
+	if err != nil {
+		t.Fatalf("CreateToken: %v", err)
+	}
+	sess, _, err := st.GetOrCreateSession("user-1", "tag", "m", nil, nil, time.Now().UnixMilli())
+	if err != nil {
+		t.Fatalf("GetOrCreateSession: %v", err)
+	}
+
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/v1/updates/?EIO=4&transport=websocket"
+
+	userConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("Dial(user): %v", err)
+	}
+	defer userConn.Close()
+	_ = waitForPrefix(t, userConn, "0{", 2*time.Second)
+	userAuth := map[string]any{"token": userToken, "clientType": "user-scoped"}
+	userAuthBytes, _ := json.Marshal(userAuth)
+	if err := userConn.WriteMessage(websocket.TextMessage, []byte("40"+string(userAuthBytes))); err != nil {
+		t.Fatalf("WriteMessage(user connect): %v", err)
+	}
+	_ = waitForPrefix(t, userConn, "40", 2*time.Second)
+
+	sessConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("Dial(session): %v", err)
+	}
+	defer sessConn.Close()
+	_ = waitForPrefix(t, sessConn, "0{", 2*time.Second)
+	sessAuth := map[string]any{"token": userToken, "clientType": "session-scoped", "sessionId": sess.ID}
+	sessAuthBytes, _ := json.Marshal(sessAuth)
+	if err := sessConn.WriteMessage(websocket.TextMessage, []byte("40"+string(sessAuthBytes))); err != nil {
+		t.Fatalf("WriteMessage(session connect): %v", err)
+	}
+	_ = waitForPrefix(t, sessConn, "40", 2*time.Second)
+
+	alivePayload := map[string]any{"sid": sess.ID, "time": float64(111), "thinking": true}
+	aliveBytes, _ := json.Marshal(alivePayload)
+	if err := sessConn.WriteMessage(websocket.TextMessage, []byte(`42["session-alive",`+string(aliveBytes)+`]`)); err != nil {
+		t.Fatalf("WriteMessage(session-alive): %v", err)
+	}
+
+	ephemeralRaw := waitForPrefix(t, userConn, "42", 2*time.Second)
+	var arr []any
+	if err := json.Unmarshal([]byte(ephemeralRaw[2:]), &arr); err != nil {
+		t.Fatalf("unmarshal ephemeral: %v (%s)", err, ephemeralRaw)
+	}
+	if len(arr) < 2 || arr[0] != "ephemeral" {
+		t.Fatalf("unexpected event: %v", arr)
+	}
+	data, ok := arr[1].(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected ephemeral body: %T", arr[1])
+	}
+	if data["type"] != "activity" || data["id"] != sess.ID {
+		t.Fatalf("unexpected ephemeral body: %v", data)
+	}
+	if data["thinking"] != true {
+		t.Fatalf("unexpected thinking: %v", data["thinking"])
+	}
+
+	updated, ok := st.GetSession("user-1", sess.ID)
+	if !ok {
+		t.Fatalf("GetSession: not found")
+	}
+	if !updated.Active || updated.ActiveAt != 111 {
+		t.Fatalf("unexpected active state: active=%v activeAt=%v", updated.Active, updated.ActiveAt)
+	}
+}
+
 func TestSocketIOHandshakeOnUserMachineDaemonPath(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	st := store.New()

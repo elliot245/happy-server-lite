@@ -482,18 +482,19 @@ func (s *Server) handleEvent(c *conn, payload string) {
 
 	case "session-alive":
 		var body struct {
-			SID  string `json:"sid"`
-			Time int64  `json:"time"`
+			SID      string `json:"sid"`
+			Time     int64  `json:"time"`
+			Thinking bool   `json:"thinking"`
 		}
 		if len(pkt.Args) < 1 || json.Unmarshal(pkt.Args[0], &body) != nil || body.SID == "" {
 			return
 		}
-		s.store.SetSessionActive(c.userID, body.SID, true, body.Time, time.Now().UnixMilli())
 		activeAt := body.Time
 		if activeAt <= 0 {
 			activeAt = time.Now().UnixMilli()
 		}
-		ephemeral, err := buildSocketEventPacket("/", nil, "ephemeral", gin.H{"type": "activity", "id": body.SID, "active": true, "activeAt": activeAt, "thinking": false})
+		s.store.SetSessionActive(c.userID, body.SID, true, activeAt, time.Now().UnixMilli())
+		ephemeral, err := buildSocketEventPacket("/", nil, "ephemeral", gin.H{"type": "activity", "id": body.SID, "active": true, "activeAt": activeAt, "thinking": body.Thinking})
 		if err == nil {
 			s.broadcastToRoom(s.roomUsers, c.userID, ephemeral)
 			s.broadcastToRoom(s.roomSessions, body.SID, ephemeral)

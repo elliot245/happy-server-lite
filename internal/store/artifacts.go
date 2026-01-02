@@ -19,12 +19,16 @@ type ArtifactUpdateResult struct {
 	CurrentBody          *string
 }
 
+func artifactKey(userID, artifactID string) string {
+	return userID + "|" + artifactID
+}
+
 func (s *Store) ListArtifacts(userID string) []model.Artifact {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	result := make([]model.Artifact, 0)
-	for _, a := range s.artifactsByID {
+	for _, a := range s.artifactsByKey {
 		if a.UserID == userID && !a.Deleted {
 			result = append(result, a)
 		}
@@ -42,7 +46,7 @@ func (s *Store) GetArtifact(userID, artifactID string) (model.Artifact, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	a, ok := s.artifactsByID[artifactID]
+	a, ok := s.artifactsByKey[artifactKey(userID, artifactID)]
 	if !ok || a.UserID != userID || a.Deleted {
 		return model.Artifact{}, false
 	}
@@ -63,7 +67,8 @@ func (s *Store) CreateArtifact(userID, artifactID, header, body, dataEncryptionK
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if existing, ok := s.artifactsByID[artifactID]; ok && existing.UserID == userID && !existing.Deleted {
+	key := artifactKey(userID, artifactID)
+	if existing, ok := s.artifactsByKey[key]; ok && !existing.Deleted {
 		return existing, false, nil
 	}
 
@@ -80,7 +85,7 @@ func (s *Store) CreateArtifact(userID, artifactID, header, body, dataEncryptionK
 		CreatedAt:        nowMillis,
 		UpdatedAt:        nowMillis,
 	}
-	s.artifactsByID[artifactID] = a
+	s.artifactsByKey[key] = a
 	return a, true, nil
 }
 
@@ -95,7 +100,8 @@ func (s *Store) UpdateArtifact(userID, artifactID string, header *string, expect
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	a, ok := s.artifactsByID[artifactID]
+	key := artifactKey(userID, artifactID)
+	a, ok := s.artifactsByKey[key]
 	if !ok || a.UserID != userID || a.Deleted {
 		return ArtifactUpdateResult{}, errors.New("artifact not found")
 	}
@@ -140,7 +146,7 @@ func (s *Store) UpdateArtifact(userID, artifactID string, header *string, expect
 	a.UpdatedAt = nowMillis
 	s.artifactSeq++
 	a.Seq = s.artifactSeq
-	s.artifactsByID[artifactID] = a
+	s.artifactsByKey[key] = a
 
 	res := ArtifactUpdateResult{Success: true}
 	if header != nil {
@@ -162,11 +168,12 @@ func (s *Store) DeleteArtifact(userID, artifactID string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	a, ok := s.artifactsByID[artifactID]
+	key := artifactKey(userID, artifactID)
+	a, ok := s.artifactsByKey[key]
 	if !ok || a.UserID != userID || a.Deleted {
 		return false
 	}
 	a.Deleted = true
-	s.artifactsByID[artifactID] = a
+	s.artifactsByKey[key] = a
 	return true
 }

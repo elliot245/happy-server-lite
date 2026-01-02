@@ -437,3 +437,115 @@ func TestArtifactsFeedFriendsAndPushTokensEndpoints(t *testing.T) {
 		t.Fatalf("expected users key")
 	}
 }
+
+func TestArtifactsAreIsolatedPerUser(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	st := store.New()
+	tokenCfg := auth.TokenConfig{Secret: "secret", Expiry: time.Hour, Issuer: "test"}
+	r := NewRouter(Deps{Store: st, TokenConfig: tokenCfg})
+
+	user1Token, err := auth.CreateToken("user-1", tokenCfg)
+	if err != nil {
+		t.Fatalf("CreateToken(user-1): %v", err)
+	}
+	user2Token, err := auth.CreateToken("user-2", tokenCfg)
+	if err != nil {
+		t.Fatalf("CreateToken(user-2): %v", err)
+	}
+
+	// both users create artifact with the same id
+	body, _ := json.Marshal(map[string]any{"id": "a1", "header": "h1", "body": "b1", "dataEncryptionKey": "k1"})
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/artifacts", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+user1Token)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	body, _ = json.Marshal(map[string]any{"id": "a1", "header": "h2", "body": "b2", "dataEncryptionKey": "k2"})
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/v1/artifacts", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+user2Token)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// user-1 list shows only its artifact
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v1/artifacts", nil)
+	req.Header.Set("Authorization", "Bearer "+user1Token)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var list1 []map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &list1); err != nil {
+		t.Fatalf("unmarshal list1: %v (%s)", err, w.Body.String())
+	}
+	if len(list1) != 1 || list1[0]["header"] != "h1" {
+		t.Fatalf("unexpected list1: %v", list1)
+	}
+
+	// user-2 list shows only its artifact
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v1/artifacts", nil)
+	req.Header.Set("Authorization", "Bearer "+user2Token)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var list2 []map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &list2); err != nil {
+		t.Fatalf("unmarshal list2: %v (%s)", err, w.Body.String())
+	}
+	if len(list2) != 1 || list2[0]["header"] != "h2" {
+		t.Fatalf("unexpected list2: %v", list2)
+	}
+
+	// update user-1 header; must not affect user-2
+	body, _ = json.Marshal(map[string]any{"header": "h1-upd", "expectedHeaderVersion": 1})
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/v1/artifacts/a1", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+user1Token)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// user-1 get returns its updated header
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v1/artifacts/a1", nil)
+	req.Header.Set("Authorization", "Bearer "+user1Token)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var full1 map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &full1); err != nil {
+		t.Fatalf("unmarshal full1: %v (%s)", err, w.Body.String())
+	}
+	if full1["header"] != "h1-upd" {
+		t.Fatalf("unexpected full1 header: %v", full1["header"])
+	}
+
+	// user-2 get remains unchanged
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v1/artifacts/a1", nil)
+	req.Header.Set("Authorization", "Bearer "+user2Token)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var full2 map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &full2); err != nil {
+		t.Fatalf("unmarshal full2: %v (%s)", err, w.Body.String())
+	}
+	if full2["header"] != "h2" {
+		t.Fatalf("unexpected full2 header: %v", full2["header"])
+	}
+}

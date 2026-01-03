@@ -8,12 +8,13 @@ import (
 )
 
 type Config struct {
-	Port         int
-	MasterSecret string
-	GinMode      string
-	TLSCertFile  string
-	TLSKeyFile   string
-	TokenExpiry  time.Duration
+	Port              int
+	MasterSecret      string
+	GinMode           string
+	TLSCertFile       string
+	TLSKeyFile        string
+	TokenExpiry       time.Duration
+	MachinesStateFile string
 }
 
 type Env interface {
@@ -54,6 +55,8 @@ func LoadConfigFromEnv(env Env) (Config, error) {
 
 	cfg.TLSCertFile = env.Getenv("TLS_CERT_FILE")
 	cfg.TLSKeyFile = env.Getenv("TLS_KEY_FILE")
+
+	cfg.MachinesStateFile = env.Getenv("MACHINES_STATE_FILE")
 
 	if raw := env.Getenv("TOKEN_EXPIRY_SECONDS"); raw != "" {
 		seconds, err := strconv.Atoi(raw)

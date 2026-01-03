@@ -18,7 +18,7 @@ func main() {
 	}
 
 	gin.SetMode(cfg.GinMode)
-	st := store.New()
+	st := store.NewWithOptions(store.Options{MachinesStateFile: cfg.MachinesStateFile})
 
 	tokenCfg := auth.TokenConfig{
 		Secret: cfg.MasterSecret,

@@ -1,7 +1,11 @@
 package store
 
 import (
+	"encoding/json"
 	"errors"
+	"log"
+	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"time"
@@ -13,15 +17,18 @@ import (
 type Store struct {
 	mu sync.RWMutex
 
+	machinesStateFile string
+	persistMu         sync.Mutex
+
 	accountsByPublicKey map[string]model.Account
 	authRequestsByKey   map[string]model.AuthRequest
 
 	sessionsByID       map[string]model.Session
 	sessionIDByUserTag map[string]string // userID + "|" + tag -> sessionID
 
-	machinesByID map[string]model.Machine
+	machinesByID   map[string]model.Machine
 	artifactsByKey map[string]model.Artifact
-	artifactSeq   int64
+	artifactSeq    int64
 
 	accountSettingsByUserID map[string]accountSettings
 
@@ -35,7 +42,15 @@ type accountSettings struct {
 }
 
 func New() *Store {
-	return &Store{
+	return NewWithOptions(Options{})
+}
+
+type Options struct {
+	MachinesStateFile string
+}
+
+func NewWithOptions(opts Options) *Store {
+	s := &Store{
 		accountsByPublicKey:     make(map[string]model.Account),
 		authRequestsByKey:       make(map[string]model.AuthRequest),
 		sessionsByID:            make(map[string]model.Session),
@@ -45,6 +60,117 @@ func New() *Store {
 		accountSettingsByUserID: make(map[string]accountSettings),
 		messages:                newMessageStore(),
 		seq:                     newSeqGenerator(),
+		machinesStateFile:       opts.MachinesStateFile,
+	}
+
+	if s.machinesStateFile != "" {
+		if err := s.loadMachinesFromFile(s.machinesStateFile); err != nil {
+			log.Printf("machines persistence: load failed (%s): %v", s.machinesStateFile, err)
+		}
+	}
+
+	return s
+}
+
+type persistedMachinesFile struct {
+	Version  int             `json:"version"`
+	Machines []model.Machine `json:"machines"`
+	SavedAt  int64           `json:"savedAt"`
+}
+
+func (s *Store) loadMachinesFromFile(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if len(data) == 0 {
+		return nil
+	}
+
+	var file persistedMachinesFile
+	if err := json.Unmarshal(data, &file); err != nil {
+		return err
+	}
+	if file.Version != 1 {
+		return errors.New("unsupported machines state version")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, m := range file.Machines {
+		if m.ID == "" || m.UserID == "" {
+			continue
+		}
+		s.machinesByID[m.ID] = m
+	}
+	return nil
+}
+
+func (s *Store) snapshotMachinesLocked() []model.Machine {
+	result := make([]model.Machine, 0, len(s.machinesByID))
+	for _, m := range s.machinesByID {
+		result = append(result, m)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
+	return result
+}
+
+func (s *Store) persistMachinesSnapshot(machines []model.Machine) {
+	path := s.machinesStateFile
+	if path == "" {
+		return
+	}
+
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
+
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		log.Printf("machines persistence: mkdir failed (%s): %v", dir, err)
+		return
+	}
+
+	file := persistedMachinesFile{Version: 1, Machines: machines, SavedAt: time.Now().UnixMilli()}
+	data, err := json.MarshalIndent(file, "", "  ")
+	if err != nil {
+		log.Printf("machines persistence: marshal failed: %v", err)
+		return
+	}
+	data = append(data, '\n')
+
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		log.Printf("machines persistence: create temp failed: %v", err)
+		return
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		log.Printf("machines persistence: chmod temp failed: %v", err)
+		return
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		log.Printf("machines persistence: write temp failed: %v", err)
+		return
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		log.Printf("machines persistence: sync temp failed: %v", err)
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		log.Printf("machines persistence: close temp failed: %v", err)
+		return
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		log.Printf("machines persistence: rename failed: %v", err)
+		return
 	}
 }
 
@@ -356,10 +482,10 @@ func (s *Store) UpsertMachine(userID, machineID, metadata string, daemonState *s
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	if existing, ok := s.machinesByID[machineID]; ok {
 		if existing.UserID != userID {
+			s.mu.Unlock()
 			return model.Machine{}, false, errors.New("machine belongs to another user")
 		}
 
@@ -380,9 +506,17 @@ func (s *Store) UpsertMachine(userID, machineID, metadata string, daemonState *s
 			existing.DataEncryptionKey = dataEncryptionKey
 			changed = true
 		}
+		var snapshot []model.Machine
 		if changed {
 			existing.UpdatedAt = nowMillis
 			s.machinesByID[machineID] = existing
+			if s.machinesStateFile != "" {
+				snapshot = s.snapshotMachinesLocked()
+			}
+		}
+		s.mu.Unlock()
+		if snapshot != nil {
+			s.persistMachinesSnapshot(snapshot)
 		}
 		return existing, false, nil
 	}
@@ -408,6 +542,14 @@ func (s *Store) UpsertMachine(userID, machineID, metadata string, daemonState *s
 		UpdatedAt:          nowMillis,
 	}
 	s.machinesByID[machineID] = m
+	var snapshot []model.Machine
+	if s.machinesStateFile != "" {
+		snapshot = s.snapshotMachinesLocked()
+	}
+	s.mu.Unlock()
+	if snapshot != nil {
+		s.persistMachinesSnapshot(snapshot)
+	}
 	return m, true, nil
 }
 
@@ -424,13 +566,14 @@ func (s *Store) GetMachine(userID, machineID string) (model.Machine, bool) {
 
 func (s *Store) UpdateMachineMetadata(userID, machineID string, expectedVersion int, metadata string, nowMillis int64) (status string, version int, currentValue string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	m, ok := s.machinesByID[machineID]
 	if !ok || m.UserID != userID {
+		s.mu.Unlock()
 		return "not-found", 0, ""
 	}
 	if expectedVersion != m.MetadataVersion {
+		s.mu.Unlock()
 		return "version-mismatch", m.MetadataVersion, m.Metadata
 	}
 
@@ -438,18 +581,28 @@ func (s *Store) UpdateMachineMetadata(userID, machineID string, expectedVersion 
 	m.MetadataVersion++
 	m.UpdatedAt = nowMillis
 	s.machinesByID[machineID] = m
+
+	var snapshot []model.Machine
+	if s.machinesStateFile != "" {
+		snapshot = s.snapshotMachinesLocked()
+	}
+	s.mu.Unlock()
+	if snapshot != nil {
+		s.persistMachinesSnapshot(snapshot)
+	}
 	return "success", m.MetadataVersion, m.Metadata
 }
 
 func (s *Store) UpdateMachineDaemonState(userID, machineID string, expectedVersion int, daemonState *string, nowMillis int64) (status string, version int, currentValue *string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	m, ok := s.machinesByID[machineID]
 	if !ok || m.UserID != userID {
+		s.mu.Unlock()
 		return "not-found", 0, nil
 	}
 	if expectedVersion != m.DaemonStateVersion {
+		s.mu.Unlock()
 		return "version-mismatch", m.DaemonStateVersion, m.DaemonState
 	}
 
@@ -457,6 +610,15 @@ func (s *Store) UpdateMachineDaemonState(userID, machineID string, expectedVersi
 	m.DaemonStateVersion++
 	m.UpdatedAt = nowMillis
 	s.machinesByID[machineID] = m
+
+	var snapshot []model.Machine
+	if s.machinesStateFile != "" {
+		snapshot = s.snapshotMachinesLocked()
+	}
+	s.mu.Unlock()
+	if snapshot != nil {
+		s.persistMachinesSnapshot(snapshot)
+	}
 	return "success", m.DaemonStateVersion, m.DaemonState
 }
 

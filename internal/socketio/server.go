@@ -17,7 +17,12 @@ import (
 
 const (
 	maxPayload   int64         = 1000000
-	writeTimeout time.Duration = 10 * time.Second
+	// Align with upstream happy-server defaults to reduce spurious disconnects on
+	// mobile clients (JS thread stalls, backgrounding, slow networks).
+	writeTimeout time.Duration = 45 * time.Second
+	pingInterval time.Duration = 15 * time.Second
+	pingTimeout  time.Duration = 45 * time.Second
+	rpcTimeout   time.Duration = 30 * time.Second
 )
 
 type Deps struct {
@@ -70,8 +75,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	open := map[string]any{
 		"sid":          c.sid,
 		"upgrades":     []string{},
-		"pingInterval": 25000,
-		"pingTimeout":  20000,
+		"pingInterval": int(pingInterval / time.Millisecond),
+		"pingTimeout":  int(pingTimeout / time.Millisecond),
 		"maxPayload":   maxPayload,
 	}
 	openBytes, _ := json.Marshal(open)
@@ -530,7 +535,7 @@ func (s *Server) handleRPCCall(method string, params string) (string, error) {
 		return "", errors.New("Method not found")
 	}
 
-	resp, err := h.emitWithAck("rpc-request", gin.H{"method": method, "params": params}, 10*time.Second)
+	resp, err := h.emitWithAck("rpc-request", gin.H{"method": method, "params": params}, rpcTimeout)
 	if err != nil {
 		return "", err
 	}
@@ -823,7 +828,7 @@ func newConn(ws *websocket.Conn) *conn {
 		ws:         ws,
 		sid:        uuid.NewString(),
 		pendingAck: make(map[int]chan []json.RawMessage),
-		nextPingAt: time.Now().Add(25 * time.Second),
+		nextPingAt: time.Now().Add(pingInterval),
 	}
 }
 
@@ -866,7 +871,7 @@ func (c *conn) pingLoop() {
 		awaiting := c.awaitingPong
 		pingSentAt := c.pingSentAt
 		nextPingAt := c.nextPingAt
-		if awaiting && now.Sub(pingSentAt) > 20*time.Second {
+		if awaiting && now.Sub(pingSentAt) > pingTimeout {
 			c.pingMu.Unlock()
 			c.close()
 			return
@@ -874,7 +879,7 @@ func (c *conn) pingLoop() {
 		if !awaiting && !now.Before(nextPingAt) {
 			c.awaitingPong = true
 			c.pingSentAt = now
-			c.nextPingAt = now.Add(25 * time.Second)
+			c.nextPingAt = now.Add(pingInterval)
 			c.pingMu.Unlock()
 			_ = c.writeText(string(enginePing))
 			continue

@@ -17,6 +17,7 @@ import (
 
 const (
 	maxPayload   int64         = 1000000
+	sendQueueSize             = 256
 	// Align with upstream happy-server defaults to reduce spurious disconnects on
 	// mobile clients (JS thread stalls, backgrounding, slow networks).
 	writeTimeout time.Duration = 45 * time.Second
@@ -71,6 +72,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	c := newConn(ws)
 	s.registerConn(c)
 	defer s.unregisterConn(c)
+	go c.writeLoop()
 
 	open := map[string]any{
 		"sid":          c.sid,
@@ -80,7 +82,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"maxPayload":   maxPayload,
 	}
 	openBytes, _ := json.Marshal(open)
-	_ = c.writeText(string(engineOpen) + string(openBytes))
+	_ = c.enqueueText(string(engineOpen) + string(openBytes))
 
 	go c.pingLoop()
 	c.readLoop(func(msg string) {
@@ -181,7 +183,7 @@ func (s *Server) broadcastToRoom(rooms map[string]map[*conn]struct{}, key string
 	s.mu.RUnlock()
 
 	for _, c := range conns {
-		if err := c.writeText(string(engineMessage) + payload); err != nil {
+		if err := c.enqueueText(string(engineMessage) + payload); err != nil {
 			s.unregisterConn(c)
 		}
 	}
@@ -322,7 +324,7 @@ func (s *Server) handleConnect(c *conn, payload string) {
 		c.close()
 		return
 	}
-	_ = c.writeText(string(engineMessage) + ack)
+	_ = c.enqueueText(string(engineMessage) + ack)
 }
 
 func (s *Server) handleEvent(c *conn, payload string) {
@@ -340,7 +342,7 @@ func (s *Server) handleEvent(c *conn, payload string) {
 		if pkt.ID != nil {
 			ackPayload, err := buildSocketAckPacket(pkt.Namespace, *pkt.ID)
 			if err == nil {
-				_ = c.writeText(string(engineMessage) + ackPayload)
+				_ = c.enqueueText(string(engineMessage) + ackPayload)
 			}
 		}
 		return
@@ -357,7 +359,7 @@ func (s *Server) handleEvent(c *conn, payload string) {
 		s.mu.Unlock()
 		registered, err := buildSocketEventPacket(pkt.Namespace, nil, "rpc-registered", gin.H{"method": body.Method})
 		if err == nil {
-			_ = c.writeText(string(engineMessage) + registered)
+			_ = c.enqueueText(string(engineMessage) + registered)
 		}
 		return
 
@@ -376,7 +378,7 @@ func (s *Server) handleEvent(c *conn, payload string) {
 		s.mu.Unlock()
 		unregistered, err := buildSocketEventPacket(pkt.Namespace, nil, "rpc-unregistered", gin.H{"method": body.Method})
 		if err == nil {
-			_ = c.writeText(string(engineMessage) + unregistered)
+			_ = c.enqueueText(string(engineMessage) + unregistered)
 		}
 		return
 
@@ -400,7 +402,7 @@ func (s *Server) handleEvent(c *conn, payload string) {
 		}
 		ackPayload, err2 := buildSocketAckPacket(pkt.Namespace, *pkt.ID, resp)
 		if err2 == nil {
-			_ = c.writeText(string(engineMessage) + ackPayload)
+			_ = c.enqueueText(string(engineMessage) + ackPayload)
 		}
 		return
 
@@ -635,7 +637,7 @@ func (s *Server) handleSessionMetadataUpdate(c *conn, pkt socketEventPacket) {
 	resp := gin.H{"result": status, "version": version, "metadata": value}
 	ackPayload, err := buildSocketAckPacket(pkt.Namespace, *pkt.ID, resp)
 	if err == nil {
-		_ = c.writeText(string(engineMessage) + ackPayload)
+		_ = c.enqueueText(string(engineMessage) + ackPayload)
 	}
 	if status != "success" {
 		return
@@ -680,7 +682,7 @@ func (s *Server) handleSessionStateUpdate(c *conn, pkt socketEventPacket) {
 	resp := gin.H{"result": status, "version": version, "agentState": value}
 	ackPayload, err := buildSocketAckPacket(pkt.Namespace, *pkt.ID, resp)
 	if err == nil {
-		_ = c.writeText(string(engineMessage) + ackPayload)
+		_ = c.enqueueText(string(engineMessage) + ackPayload)
 	}
 	if status != "success" {
 		return
@@ -725,7 +727,7 @@ func (s *Server) handleMachineMetadataUpdate(c *conn, pkt socketEventPacket) {
 	resp := gin.H{"result": status, "version": version, "metadata": value}
 	ackPayload, err := buildSocketAckPacket(pkt.Namespace, *pkt.ID, resp)
 	if err == nil {
-		_ = c.writeText(string(engineMessage) + ackPayload)
+		_ = c.enqueueText(string(engineMessage) + ackPayload)
 	}
 	if status != "success" {
 		return
@@ -770,7 +772,7 @@ func (s *Server) handleMachineStateUpdate(c *conn, pkt socketEventPacket) {
 	resp := gin.H{"result": status, "version": version, "daemonState": value}
 	ackPayload, err := buildSocketAckPacket(pkt.Namespace, *pkt.ID, resp)
 	if err == nil {
-		_ = c.writeText(string(engineMessage) + ackPayload)
+		_ = c.enqueueText(string(engineMessage) + ackPayload)
 	}
 	if status != "success" {
 		return
@@ -809,11 +811,12 @@ type conn struct {
 	sessionID  string
 	machineID  string
 
-	sendMu sync.Mutex
-
 	ackMu      sync.Mutex
 	nextAckID  int
 	pendingAck map[int]chan []json.RawMessage
+
+	sendCh chan string
+	done   chan struct{}
 
 	pingMu       sync.Mutex
 	awaitingPong bool
@@ -829,6 +832,8 @@ func newConn(ws *websocket.Conn) *conn {
 		sid:        uuid.NewString(),
 		pendingAck: make(map[int]chan []json.RawMessage),
 		nextPingAt: time.Now().Add(pingInterval),
+		sendCh:     make(chan string, sendQueueSize),
+		done:       make(chan struct{}),
 	}
 }
 
@@ -836,16 +841,47 @@ func (c *conn) close() {
 	if c.closed.Swap(true) {
 		return
 	}
+	close(c.done)
 	_ = c.ws.Close()
 }
 
 func (c *conn) writeText(msg string) error {
-	c.sendMu.Lock()
-	defer c.sendMu.Unlock()
 	if err := c.ws.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
 		return err
 	}
 	return c.ws.WriteMessage(websocket.TextMessage, []byte(msg))
+}
+
+func (c *conn) enqueueText(msg string) error {
+	select {
+	case <-c.done:
+		return errors.New("connection closed")
+	default:
+	}
+
+	select {
+	case c.sendCh <- msg:
+		return nil
+	case <-c.done:
+		return errors.New("connection closed")
+	default:
+		c.close()
+		return errors.New("send queue full")
+	}
+}
+
+func (c *conn) writeLoop() {
+	for {
+		select {
+		case <-c.done:
+			return
+		case msg := <-c.sendCh:
+			if err := c.writeText(msg); err != nil {
+				c.close()
+				return
+			}
+		}
+	}
 }
 
 func (c *conn) readLoop(onMessage func(string)) {
@@ -881,7 +917,10 @@ func (c *conn) pingLoop() {
 			c.pingSentAt = now
 			c.nextPingAt = now.Add(pingInterval)
 			c.pingMu.Unlock()
-			_ = c.writeText(string(enginePing))
+			if err := c.enqueueText(string(enginePing)); err != nil {
+				c.close()
+				return
+			}
 			continue
 		}
 		c.pingMu.Unlock()
@@ -899,7 +938,7 @@ func (c *conn) writeSocketError(msg string) error {
 	if err != nil {
 		return err
 	}
-	return c.writeText(string(engineMessage) + packet)
+	return c.enqueueText(string(engineMessage) + packet)
 }
 
 func (c *conn) emitWithAck(event string, arg any, timeout time.Duration) ([]json.RawMessage, error) {
@@ -917,7 +956,7 @@ func (c *conn) emitWithAck(event string, arg any, timeout time.Duration) ([]json
 		c.ackMu.Unlock()
 		return nil, err
 	}
-	if err := c.writeText(string(engineMessage) + packet); err != nil {
+	if err := c.enqueueText(string(engineMessage) + packet); err != nil {
 		c.ackMu.Lock()
 		delete(c.pendingAck, id)
 		c.ackMu.Unlock()
